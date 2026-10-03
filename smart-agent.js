@@ -1,13 +1,25 @@
 import axios from 'axios';
 import readline from 'readline';
 import { parseFormFields, findNavigation } from './lib/google-form-snapshot.js';
+import {
+  checkOllamaReachable,
+  getAIAnswersForFields,
+  resolveAnswerToAction,
+} from './lib/form-ai-ollama.js';
 
 const BASE_URL = 'http://localhost:9377';
 const USER_ID = 'default';
 const SESSION_KEY = 'smart-form-session';
 
+const argv = process.argv.slice(2);
+const AI_MODE = argv.includes('--ai')
+  || process.env.AI_MODE === '1'
+  || process.env.CAMOFOX_FORM_AI === '1';
+const modelFlag = argv.find((a) => a.startsWith('--model='));
+const OLLAMA_MODEL = modelFlag?.split('=')[1] || process.env.OLLAMA_MODEL;
+
 const FORM_URL = process.env.FORM_URL
-  || 'https://docs.google.com/forms/d/e/1FAIpQLSe-xRn6ZsEMi8IVR5AIGMr2vb2SyEC8MTQaDpQgA5zbaIArXw/viewform';
+  || 'https://docs.google.com/forms/d/e/1FAIpQLSfX4DlOfqjXLpk4WOXaJEjHnNf9_obXa2qV2zpRQfNKedUriw/viewform?usp=publish-editor';
 
 const MAX_FORM_PAGES = 25;
 const SCROLL_PASSES = 6;
@@ -132,38 +144,33 @@ async function promptForAnswer(field) {
       ? 'Enter option numbers or labels, comma-separated (or "skip"): '
       : 'Enter option number or label (or "skip"): ';
     const raw = (await ask(hint)).trim();
-    if (!raw || raw.toLowerCase() === 'skip') return null;
-    if (multi) {
-      const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
-      const refs = [];
-      for (const part of parts) {
-        const num = parseInt(part, 10);
-        if (!Number.isNaN(num) && num >= 1 && num <= field.options.length) {
-          refs.push(field.options[num - 1]);
-        } else {
-          const match = field.options.find(
-            (o) => o.label.toLowerCase() === part.toLowerCase()
-              || o.label.toLowerCase().includes(part.toLowerCase()),
-          );
-          if (match) refs.push(match);
-        }
-      }
-      return refs.length ? { kind: 'multi-click', options: refs } : null;
-    }
-    const num = parseInt(raw, 10);
-    if (!Number.isNaN(num) && num >= 1 && num <= field.options.length) {
-      return { kind: 'click', ref: field.options[num - 1].ref };
-    }
-    const match = field.options.find(
-      (o) => o.label.toLowerCase() === raw.toLowerCase()
-        || o.label.toLowerCase().includes(raw.toLowerCase()),
-    );
-    return match ? { kind: 'click', ref: match.ref } : null;
+    return resolveAnswerToAction(field, raw);
   }
 
   const raw = (await ask('Your answer (or "skip"): ')).trim();
-  if (!raw || raw.toLowerCase() === 'skip') return null;
-  return { kind: 'type', ref: field.ref, text: raw };
+  return resolveAnswerToAction(field, raw);
+}
+
+async function aiAnswersForPage(fields, answersCache) {
+  const missing = fields.filter((f) => !answersCache.has(fieldKey(f)));
+  if (!missing.length) return;
+
+  console.log(`\n🧠 AI answering ${missing.length} question(s) on this page...`);
+  const answerMap = await getAIAnswersForFields(missing, fieldKey, { model: OLLAMA_MODEL });
+
+  for (const field of missing) {
+    const key = fieldKey(field);
+    const raw = answerMap.get(key) ?? answerMap.get(field.question);
+    let action = resolveAnswerToAction(field, raw);
+    if (!action && field.options?.length) {
+      action = resolveAnswerToAction(field, '1');
+    }
+    if (!action && field.ref) {
+      action = resolveAnswerToAction(field, 'See response');
+    }
+    answersCache.set(key, action);
+    console.log(`   🤖 ${field.question} → ${raw ?? '(fallback)'}`);
+  }
 }
 
 async function applyAnswer(tabId, action) {
@@ -213,7 +220,11 @@ async function fillCombobox(tabId, field, answerText) {
   return true;
 }
 
-async function fillPage(tabId, fields, answersCache) {
+async function fillPage(tabId, fields, answersCache, { aiMode = false } = {}) {
+  if (aiMode) {
+    await aiAnswersForPage(fields, answersCache);
+  }
+
   for (const field of fields) {
     const key = fieldKey(field);
     let action;
@@ -244,7 +255,20 @@ async function clickNav(tabId, ref, label) {
 
 async function runSmartAgent() {
   try {
-    console.log('🚀 Smart Form Agent — scan, ask you for answers, fill, submit');
+    if (AI_MODE) {
+      const ok = await checkOllamaReachable();
+      if (!ok) {
+        console.error('❌ AI mode requires Ollama running (ollama serve). Start Ollama, then retry with --ai');
+        rl.close();
+        process.exitCode = 1;
+        return;
+      }
+      console.log('🚀 Smart Form Agent — AI mode (MCQ / exam auto-answer via Ollama)');
+      console.log(`   Model: ${OLLAMA_MODEL || 'qwen2.5:3b (default)'}`);
+    } else {
+      console.log('🚀 Smart Form Agent — manual mode (prompts you for each answer)');
+      console.log('   Tip: use --ai for automatic MCQ/exam answers');
+    }
     console.log(`   Form: ${FORM_URL}\n`);
 
     const tabResponse = await axios.post(`${BASE_URL}/tabs`, {
@@ -285,7 +309,7 @@ async function runSmartAgent() {
           const extra = f.options ? ` (${f.options.length} choices)` : '';
           console.log(`   • ${f.question}${extra}`);
         });
-        await fillPage(tabId, fields, answersCache);
+        await fillPage(tabId, fields, answersCache, { aiMode: AI_MODE });
       }
 
       snapshot = await getSnapshotText(tabId);
@@ -312,7 +336,8 @@ async function runSmartAgent() {
         if (hasValidationHints(snapshot)) {
           console.log('\n⚠️ Google flagged required questions — filling this page again.');
           const retryFields = await collectPageFields(tabId);
-          await fillPage(tabId, retryFields, answersCache);
+          for (const f of retryFields) answersCache.delete(fieldKey(f));
+          await fillPage(tabId, retryFields, answersCache, { aiMode: AI_MODE });
           await clickNav(tabId, nav.next, 'Next');
         }
         continue;
@@ -331,7 +356,7 @@ async function runSmartAgent() {
           console.log('\n⚠️ Submit blocked — required fields missing. Please answer again.');
           const retryFields = await collectPageFields(tabId);
           for (const f of retryFields) answersCache.delete(fieldKey(f));
-          await fillPage(tabId, retryFields, answersCache);
+          await fillPage(tabId, retryFields, answersCache, { aiMode: AI_MODE });
           const nav2 = findNavigation(await getSnapshotText(tabId));
           if (nav2.submit) await clickNav(tabId, nav2.submit, 'Submit');
         } else {
