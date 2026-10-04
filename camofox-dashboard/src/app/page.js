@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 
 // IMPORTANT: Change this to your deployed backend URL later (e.g., https://your-app.railway.app)
 // For local testing, keep it as http://localhost:3001
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'https://camofox-backend.onrender.com';
 
 export default function Dashboard() {
   const [logs, setLogs] = useState([]);
