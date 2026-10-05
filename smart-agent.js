@@ -13,6 +13,7 @@ const USER_ID = 'default';
 const SESSION_KEY = 'smart-form-session';
 
 const argv = process.argv.slice(2);
+const DASHBOARD_MODE = process.env.DASHBOARD_MODE === '1';
 const AI_MODE = argv.includes('--ai')
   || process.env.AI_MODE === '1'
   || process.env.CAMOFOX_FORM_AI === '1';
@@ -27,10 +28,41 @@ const SCROLL_PASSES = 6;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+function dashLog(message) {
+  if (DASHBOARD_MODE) console.log(`@@LOG@@${message}`);
+  else console.log(message);
+}
+
+function dashDone() {
+  if (DASHBOARD_MODE) console.log('@@DONE@@');
+}
+
+function dashError(message) {
+  if (DASHBOARD_MODE) console.log(`@@ERROR@@${message}`);
+  else console.error(message);
+}
+
 function ask(prompt) {
+  if (DASHBOARD_MODE) {
+    return new Promise((resolve) => rl.question('', resolve));
+  }
   return new Promise((resolve) => rl.question(prompt, resolve));
 }
+
+async function dashPrompt(payload) {
+  console.log(`@@PROMPT@@${JSON.stringify(payload)}`);
+  return (await ask('')).trim();
+}
+
 function pauseForLogin() {
+  if (DASHBOARD_MODE) {
+    return dashPrompt({
+      kind: 'login',
+      question:
+        'Google sign-in required. Use the live browser (right panel) to log in, then click Continue.',
+    });
+  }
   return ask('\n🔒 PAUSED: Log in visually if needed, then press [ENTER]...');
 }
 
@@ -132,6 +164,28 @@ async function collectPageFields(tabId) {
 }
 
 async function promptForAnswer(field) {
+  if (DASHBOARD_MODE) {
+    const multi = field.type === 'checkbox';
+    const hint = field.options?.length
+      ? multi
+        ? 'Option numbers or labels, comma-separated (or "skip")'
+        : 'Option number or label (or "skip")'
+      : 'Your answer (or "skip")';
+    const raw = await dashPrompt({
+      kind: 'field',
+      ref: field.ref,
+      question: field.question,
+      fieldType: field.type,
+      options: field.options?.map((opt, i) => ({
+        index: i + 1,
+        label: opt.label,
+        ref: opt.ref,
+      })),
+      hint,
+    });
+    return resolveAnswerToAction(field, raw);
+  }
+
   console.log('\n────────────────────────────────────────');
   console.log(`📋 ${field.question}`);
   console.log(`   Type: ${field.type}`);
@@ -259,18 +313,20 @@ async function runSmartAgent() {
     if (AI_MODE) {
       const ok = await checkOllamaReachable();
       if (!ok) {
-        console.error('❌ AI mode requires Ollama running (ollama serve). Start Ollama, then retry with --ai');
+        const msg =
+          'AI mode requires Ollama running (ollama serve). Start Ollama, then retry.';
+        dashError(msg);
         rl.close();
         process.exitCode = 1;
         return;
       }
-      console.log('🚀 Smart Form Agent — AI mode (MCQ / exam auto-answer via Ollama)');
-      console.log(`   Model: ${OLLAMA_MODEL || 'qwen2.5:3b (default)'}`);
+      dashLog('🚀 Smart Form Agent — AI mode (autonomous answers via Ollama)');
+      dashLog(`   Model: ${OLLAMA_MODEL || 'qwen2.5:3b (default)'}`);
     } else {
-      console.log('🚀 Smart Form Agent — manual mode (prompts you for each answer)');
-      console.log('   Tip: use --ai for automatic MCQ/exam answers');
+      dashLog('🚀 Smart Form Agent — guided mode (you provide each answer in the dashboard)');
+      if (!DASHBOARD_MODE) dashLog('   Tip: use --ai for automatic MCQ/exam answers');
     }
-    console.log(`   Form: ${FORM_URL}\n`);
+    dashLog(`   Form: ${FORM_URL}`);
 
     const tabResponse = await axios.post(`${BASE_URL}/tabs`, {
       userId: USER_ID,
@@ -278,7 +334,7 @@ async function runSmartAgent() {
       url: FORM_URL,
     });
     const tabId = tabResponse.data.tabId;
-    console.log(`✅ Tab created: ${tabId}`);
+    dashLog(`✅ Tab created: ${tabId}`);
     await sleep(3000);
 
     let snapshot = await getSnapshotText(tabId);
@@ -296,9 +352,10 @@ async function runSmartAgent() {
       }
       if (fields.length === 0) {
         const debugSnap = await getSnapshotText(tabId);
-        console.error('\n❌ Could not detect any form inputs in the accessibility snapshot.');
-        console.error('   Ensure the form URL loads in the browser and you are past any login wall.');
-        if (/textbox/i.test(debugSnap)) {
+        dashError(
+          'Could not detect form inputs. Open the form in the live browser and complete any login wall.',
+        );
+        if (/textbox/i.test(debugSnap) && !DASHBOARD_MODE) {
           console.error('   (Textboxes exist in snapshot but parser failed — please report this form.)');
         }
         rl.close();
@@ -315,8 +372,9 @@ async function runSmartAgent() {
 
       snapshot = await getSnapshotText(tabId);
       if (isSuccessScreen(snapshot)) {
-        console.log('\n🎉 Form submitted — Google recorded your response.');
+        dashLog('🎉 Form submitted — Google recorded your response.');
         rl.close();
+        dashDone();
         return;
       }
 
@@ -325,8 +383,9 @@ async function runSmartAgent() {
         await clickNav(tabId, nav.review, 'Review');
         snapshot = await getSnapshotText(tabId);
         if (isSuccessScreen(snapshot)) {
-          console.log('\n🎉 Form complete.');
+          dashLog('🎉 Form complete.');
           rl.close();
+          dashDone();
           return;
         }
       }
@@ -352,7 +411,7 @@ async function runSmartAgent() {
         await clickNav(tabId, nav.submit, 'Submit');
         snapshot = await getSnapshotText(tabId);
         if (isSuccessScreen(snapshot)) {
-          console.log('\n🎉 Form submitted successfully.');
+          dashLog('🎉 Form submitted successfully.');
         } else if (hasValidationHints(snapshot)) {
           console.log('\n⚠️ Submit blocked — required fields missing. Please answer again.');
           const retryFields = await collectPageFields(tabId);
@@ -361,9 +420,10 @@ async function runSmartAgent() {
           const nav2 = findNavigation(await getSnapshotText(tabId));
           if (nav2.submit) await clickNav(tabId, nav2.submit, 'Submit');
         } else {
-          console.log('\n✅ Submit clicked. Check the browser tab to confirm.');
+          dashLog('✅ Submit clicked. Check the live browser to confirm.');
         }
         rl.close();
+        dashDone();
         return;
       }
 
@@ -372,8 +432,12 @@ async function runSmartAgent() {
     }
 
     rl.close();
+    dashDone();
   } catch (error) {
-    console.error('❌ Agent failed:', error.response?.data || error.message);
+    const msg = error.response?.data
+      ? JSON.stringify(error.response.data)
+      : error.message;
+    dashError(`Agent failed: ${msg}`);
     rl.close();
     process.exitCode = 1;
   }

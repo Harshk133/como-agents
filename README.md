@@ -15,6 +15,24 @@
 
 <br/>
 
+
+<img src="frontend.png" alt="frontend image" />
+
+<h1>
+FOLLOW THIS TO RUN THIS PROJECT
+
+to run the frontend use command -> npm run dev
+<br/>
+start the form filler agent as -> node dashboard-server.js
+<br/>
+start the ollama server (use  qwen2.5:3b) -> ollama serve
+<br/>
+docker command to run -> docker run --rm   -p 9377:9377   -p 127.0.0.1:6080:6080   -e ENABLE_VNC=1   -e VNC_BIND=0.0.0.0   -e VNC_PASSWORD=your-secret-password   camofox-browser
+
+
+
+</h1>
+
 > <a href="https://askjo.ai?ref=camofox"><img src="jo-logo.png" alt="Jo" width="80" height="80" align="left" /></a>
 >
 > Built by the team behind <a href="https://askjo.ai?ref=camofox"><strong>jo, a personal AI agent</strong></a> that runs half on your Mac, half on a dedicated cloud machine just for you -- with zero maintenance needed. Available on macOS, Telegram, WhatsApp, and email. <a href="https://askjo.ai?ref=camofox">Try the beta free -></a>
