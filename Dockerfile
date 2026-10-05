@@ -81,7 +81,14 @@ COPY scripts/ ./scripts/
 # land in the image. Independent of the glibc issue noted at the FROM line: this
 # one fails at build time on any Debian release, that one at runtime on bookworm.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential python3 \
+    && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3 \
+    x11vnc \
+    novnc \
+    python3-websockify \
+    net-tools \
+    procps \
     && npm ci --omit=dev \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*

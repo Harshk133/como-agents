@@ -7,7 +7,8 @@ import {
   resolveAnswerToAction,
 } from './lib/form-ai-ollama.js';
 
-const BASE_URL = 'http://localhost:9377';
+// Change this line in smart-agent.js:
+const BASE_URL = `http://localhost:${process.env.PORT || 9377}`;
 const USER_ID = 'default';
 const SESSION_KEY = 'smart-form-session';
 
