@@ -20,8 +20,8 @@ const AI_MODE = argv.includes('--ai')
 const modelFlag = argv.find((a) => a.startsWith('--model='));
 const OLLAMA_MODEL = modelFlag?.split('=')[1] || process.env.OLLAMA_MODEL;
 
-const FORM_URL = process.env.FORM_URL
-  || 'https://docs.google.com/forms/d/e/1FAIpQLSfX4DlOfqjXLpk4WOXaJEjHnNf9_obXa2qV2zpRQfNKedUriw/viewform?usp=publish-editor';
+const FORM_URL = process.env.NEXT_PUBLIC_FORM_URL
+  || 'https://docs.google.com/forms/d/e/1FAIpQLSc63YdVXFb93gM2v_OwEv5Dw9bFxfhi6NTIeKPQl5reT3NIhA/viewform?usp=publish-editor';
 
 const MAX_FORM_PAGES = 25;
 const SCROLL_PASSES = 6;
