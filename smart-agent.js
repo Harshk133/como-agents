@@ -3,6 +3,7 @@ import readline from 'readline';
 import { parseFormFields, findNavigation } from './lib/google-form-snapshot.js';
 import {
   checkOllamaReachable,
+  describeAiBackend,
   getAIAnswersForFields,
   resolveAnswerToAction,
 } from './lib/form-ai-ollama.js';
@@ -464,15 +465,16 @@ async function runSmartAgent() {
     if (AI_MODE) {
       const ok = await checkOllamaReachable();
       if (!ok) {
-        const msg =
-          'AI mode requires Ollama running (ollama serve). Start Ollama, then retry.';
+        const msg = process.env.LLM_API_KEY
+          ? `AI mode could not reach ${describeAiBackend()}. Check LLM_API_KEY / LLM_BASE_URL / LLM_MODEL.`
+          : 'AI mode requires Ollama running (ollama serve), or set LLM_API_KEY for a hosted API.';
         dashError(msg);
         rl.close();
         process.exitCode = 1;
         return;
       }
-      dashLog('🚀 Smart Form Agent — AI mode (autonomous answers via Ollama)');
-      dashLog(`   Model: ${OLLAMA_MODEL || 'qwen2.5:3b (default)'}`);
+      dashLog('🚀 Smart Form Agent — AI mode (autonomous answers)');
+      dashLog(`   Model: ${describeAiBackend({ model: OLLAMA_MODEL })}`);
     } else {
       dashLog('🚀 Smart Form Agent — guided mode (you provide each answer in the dashboard)');
       if (!DASHBOARD_MODE) dashLog('   Tip: use --ai for automatic MCQ/exam answers');

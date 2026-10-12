@@ -111,9 +111,9 @@ RUN sh scripts/install-plugin-deps.sh
 ENV NODE_ENV=production
 ENV CAMOFOX_PORT=9377
 
-EXPOSE 9377
+EXPOSE 10000
 
-CMD ["sh", "-c", "node --max-old-space-size=${MAX_OLD_SPACE_SIZE:-128} server.js"]
+CMD ["sh", "-c", "node --max-old-space-size=${MAX_OLD_SPACE_SIZE:-128} ./dashboard-server.js & node gateway.js"]
 
 # Optional: rebuild plugin deps after adding third-party plugins
 # Usage: docker build --target with-plugins -t camofox-browser .
