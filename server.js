@@ -4115,7 +4115,9 @@ const UPLOAD_SETTLE_MS = 1500; // let the page process the upload / render a pre
  *       contains the files (default: ~/.camofox/uploads). Two strategies are
  *       tried in order: (1) if an
  *       <input type="file"> is already present, call Playwright setInputFiles
- *       on it directly (works for hidden inputs); (2) otherwise arm a
+ *       on it directly (works for hidden inputs) -- the input matched by
+ *       `selector` when it is itself a file input, else the first one on the
+ *       page; (2) otherwise arm a
  *       filechooser listener, activate the trigger element (ref or selector)
  *       via keyboard (focus + Enter) then a forced click as fallback, and call
  *       setFiles on the resulting chooser. Each path must be an absolute path
@@ -4147,7 +4149,7 @@ const UPLOAD_SETTLE_MS = 1500; // let the page process the upload / render a pre
  *                 description: "Trigger element ref (e.g. e36). Optional when an input[type=file] already exists."
  *               selector:
  *                 type: string
- *                 description: "Trigger element CSS/Playwright selector. Optional when an input[type=file] already exists."
+ *                 description: "Trigger element CSS/Playwright selector, or a selector for the specific input[type=file] to fill (e.g. 'input[type=\"file\"] >> nth=1'). Optional when an input[type=file] already exists."
  *               timeout:
  *                 type: integer
  *                 default: 12000
@@ -4181,8 +4183,23 @@ app.post('/tabs/:tabId/upload', async (req, res) => {
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
 
     const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
-      const directInput = tabState.page.locator('input[type="file"]').first();
+      let directInput = tabState.page.locator('input[type="file"]').first();
       let attachedVia = null;
+
+      // A selector that itself resolves to an <input type=file> picks WHICH
+      // input to fill (forms often have several: photo, signature, ...).
+      // Otherwise the selector is a trigger and the first file input is used.
+      if (selector) {
+        try {
+          const targeted = tabState.page.locator(selector).first();
+          if (await targeted.count() > 0
+            && await targeted.evaluate((el) => el instanceof HTMLInputElement && el.type === 'file', null, { timeout: UPLOAD_INPUT_TIMEOUT_MS })) {
+            directInput = targeted;
+          }
+        } catch (e) {
+          log('info', 'upload: selector is not a file input', { error: e.message });
+        }
+      }
 
       const trySetExistingInput = async () => {
         try {

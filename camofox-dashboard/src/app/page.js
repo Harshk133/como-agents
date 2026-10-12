@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { BorderBeam } from 'border-beam';
+import QRCode from 'qrcode';
+import PhoneBridgePanel from './phone-bridge-panel';
 
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
@@ -32,8 +34,41 @@ function formatLogTime(ts) {
   });
 }
 
+let entrySeq = 0;
+
 function logEntry(role, text, extra = {}) {
-  return { role, text, ts: Date.now(), ...extra };
+  entrySeq += 1;
+  return { id: entrySeq, role, text, ts: Date.now(), ...extra };
+}
+
+/** "• Email address (3 choices)" → { question, choices } */
+function parseQuestionBullet(text) {
+  const m = text.match(/^•\s*(.*?)(?:\s+\((\d+) choices\))?$/);
+  if (!m) return null;
+  return { question: m[1].trim(), choices: m[2] ? Number(m[2]) : null };
+}
+
+/** Map a raw answer ("2", "1, 3", "Yes") to the option indices it selects. */
+function resolvePickedOptions(prompt, raw) {
+  const options = prompt?.options;
+  if (!options?.length || !raw) return [];
+  const picked = [];
+  for (const token of String(raw).split(',').map((t) => t.trim()).filter(Boolean)) {
+    const byIndex = /^\d+$/.test(token) ? options.find((o) => o.index === Number(token)) : null;
+    const byLabel = options.find((o) => o.label?.toLowerCase() === token.toLowerCase());
+    const hit = byIndex || byLabel;
+    if (hit && !picked.includes(hit.index)) picked.push(hit.index);
+  }
+  return picked;
+}
+
+function formatAnswerDisplay(prompt, raw) {
+  const picked = resolvePickedOptions(prompt, raw);
+  if (!picked.length) return raw;
+  return picked
+    .map((i) => prompt.options.find((o) => o.index === i)?.label)
+    .filter(Boolean)
+    .join(', ');
 }
 
 function isGoogleFormUrl(raw) {
@@ -112,6 +147,273 @@ function ToolCallCard({ tool, ts }) {
           <p className="mt-1.5 font-mono text-[10px] text-[#444444]">{formatLogTime(ts)}</p>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function StepMarker({ status, index }) {
+  if (status === 'answered' || status === 'auto') {
+    return (
+      <span
+        className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] ${status === 'answered'
+            ? 'bg-emerald-500/20 text-emerald-400'
+            : 'bg-[#292929] text-[#A1A1A1]'
+          }`}
+      >
+        ✓
+      </span>
+    );
+  }
+  if (status === 'skipped') {
+    return (
+      <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[#1A1A1A] text-[9px] text-[#666666]">
+        –
+      </span>
+    );
+  }
+  if (status === 'current') {
+    return (
+      <span className="relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[#7C3AED] text-[9px] font-medium text-white">
+        <span className="absolute inset-0 animate-ping rounded-full bg-[#7C3AED]/40" />
+        <span className="relative">{index}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[#333333] text-[9px] text-[#666666]">
+      {index}
+    </span>
+  );
+}
+
+function FormScanCard({ scan }) {
+  const total = scan.questions.length || scan.total;
+  const done = scan.questions.filter((q) => q.status !== 'pending' && q.status !== 'current').length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-[#292929] bg-[#0B0B0B]/90">
+      <div className="flex items-center justify-between gap-2 border-b border-[#292929] px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-[#7C3AED]/20 text-[10px] text-[#8B5CF6]">
+            ☰
+          </span>
+          <span className="truncate text-[12px] font-medium text-[#F5F5F5]">
+            Found {total} question{total === 1 ? '' : 's'}
+            {scan.page ? <span className="text-[#666666]"> · page {scan.page}</span> : null}
+          </span>
+        </div>
+        <span className="shrink-0 font-mono text-[10px] text-[#666666]">
+          {done}/{total}
+        </span>
+      </div>
+      <div className="h-0.5 bg-[#151515]">
+        <div className="h-full bg-[#7C3AED] transition-all duration-500" style={{ width: `${pct}%` }} />
+      </div>
+      <ol className="space-y-1.5 px-3 py-2.5">
+        {scan.questions.map((q, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <StepMarker status={q.status} index={i + 1} />
+            <div className="min-w-0 flex-1">
+              <p
+                className={`text-[12px] leading-snug ${q.status === 'current'
+                    ? 'text-[#F5F5F5]'
+                    : q.status === 'pending'
+                      ? 'text-[#A1A1A1]'
+                      : 'text-[#666666]'
+                  }`}
+              >
+                {q.question}
+              </p>
+              {q.answer ? (
+                <p className="truncate text-[11px] text-[#8B5CF6]/80">→ {q.answer}</p>
+              ) : q.status === 'auto' ? (
+                <p className="text-[11px] text-[#444444]">filled automatically</p>
+              ) : null}
+            </div>
+            {q.choices ? (
+              <span className="shrink-0 text-[10px] text-[#444444]">{q.choices} choices</span>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function isLocalUrl(raw) {
+  try {
+    const host = new URL(raw).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
+/** QR code for a file-upload question: scan it to open the phone upload page. */
+function PhoneUploadBlock({ prompt, active }) {
+  const [qr, setQr] = useState(null);
+
+  useEffect(() => {
+    if (!active || !prompt.pairUrl) return undefined;
+    let cancelled = false;
+    QRCode.toDataURL(prompt.pairUrl, { margin: 1, width: 200, errorCorrectionLevel: 'M' })
+      .then((image) => {
+        if (!cancelled) setQr({ forUrl: prompt.pairUrl, image });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [active, prompt.pairUrl]);
+
+  if (!active) {
+    return <p className="mt-2 text-[11px] text-[#666666]">Phone upload closed.</p>;
+  }
+  const image = qr?.forUrl === prompt.pairUrl ? qr.image : null;
+  const expires = prompt.pairingExpiresAt ? formatLogTime(prompt.pairingExpiresAt).slice(0, 5) : null;
+
+  return (
+    <div className="mt-2.5 flex gap-3">
+      <div className="shrink-0 rounded-lg bg-white p-1.5">
+        {image ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={image} alt="QR code to upload this file from your phone" width={136} height={136} className="block h-[136px] w-[136px]" />
+        ) : (
+          <div className="h-[136px] w-[136px]" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1 text-[12px] leading-relaxed text-[#A1A1A1]">
+        <p>
+          Scan with your phone camera, tap <b className="text-[#F5F5F5]">Pair this phone</b>, pick the file and tap{' '}
+          <b className="text-[#F5F5F5]">Send</b>. It is attached here automatically.
+        </p>
+        <p className="mt-1.5">
+          Code <span className="font-mono tracking-[0.15em] text-[#8B5CF6]">{prompt.code}</span>
+          {expires ? <span className="text-[#666666]"> · QR valid until {expires}</span> : null}
+        </p>
+        <a
+          href={prompt.pairUrl}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="mt-1 inline-block text-[11px] text-[#666666] underline-offset-2 hover:text-[#A1A1A1] hover:underline"
+        >
+          Open link instead
+        </a>
+        {isLocalUrl(prompt.pairUrl) ? (
+          <p className="mt-1.5 rounded-md border border-amber-900/50 bg-amber-950/20 px-2 py-1 text-[10px] leading-snug text-amber-200/90">
+            This link points at localhost, which a phone cannot open. Set PHONE_BRIDGE_PUBLIC_URL on the Camofox server.
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function QuestionBubble({ item, active, onAnswer }) {
+  const { prompt, step, total, page, answer } = item;
+  const [selected, setSelected] = useState([]);
+  const isLogin = prompt.kind === 'login';
+  const multi = prompt.fieldType === 'checkbox';
+  const picked = answer ? resolvePickedOptions(prompt, answer.raw ?? answer.text) : [];
+
+  const toggle = (index) =>
+    setSelected((prev) =>
+      prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index],
+    );
+
+  return (
+    <div className="flex justify-start">
+      <div
+        className={`w-full max-w-[92%] rounded-2xl rounded-bl-md border px-3.5 py-3 text-sm leading-relaxed transition-colors ${active
+            ? 'border-[#7C3AED]/40 bg-[#7C3AED]/10'
+            : 'border-[#292929] bg-[#151515]/90'
+          }`}
+      >
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-[#8B5CF6]">
+            {isLogin ? 'Sign in' : step ? `Question ${step} of ${total}` : 'Question'}
+            {!isLogin && page ? <span className="text-[#666666]"> · page {page}</span> : null}
+          </p>
+          {prompt.fieldType ? (
+            <span className="rounded-full border border-[#292929] px-1.5 py-0.5 text-[9px] text-[#666666]">
+              {prompt.fieldType}
+            </span>
+          ) : null}
+        </div>
+
+        <p className="whitespace-pre-wrap break-words text-[#F5F5F5]">{prompt.question}</p>
+
+        {prompt.kind === 'file-upload' ? <PhoneUploadBlock prompt={prompt} active={active} /> : null}
+
+        {prompt.options?.length ? (
+          <div className="mt-2.5 flex flex-wrap gap-1.5">
+            {prompt.options.map((opt) => {
+              const isPicked = active ? selected.includes(opt.index) : picked.includes(opt.index);
+              return (
+                <button
+                  key={opt.ref || opt.index}
+                  type="button"
+                  disabled={!active}
+                  onClick={() => (multi ? toggle(opt.index) : onAnswer(String(opt.index)))}
+                  className={`rounded-lg border px-2.5 py-1 text-left text-[12px] transition-colors ${isPicked
+                      ? 'border-[#7C3AED] bg-[#7C3AED]/25 text-white'
+                      : active
+                        ? 'border-[#333333] bg-[#0B0B0B] text-[#A1A1A1] hover:border-[#7C3AED]/60 hover:text-[#F5F5F5]'
+                        : 'border-[#222222] text-[#555555]'
+                    }`}
+                >
+                  <span className="mr-1 font-mono text-[10px] text-[#8B5CF6]">{opt.index}</span>
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {active && multi && selected.length ? (
+          <button
+            type="button"
+            onClick={() => onAnswer(selected.join(', '))}
+            className="mt-2.5 w-full rounded-lg bg-[#7C3AED] py-1.5 text-xs font-medium text-white hover:bg-[#8B5CF6]"
+          >
+            Send {selected.length} selected
+          </button>
+        ) : null}
+
+        {active && isLogin ? (
+          <button
+            type="button"
+            onClick={() => onAnswer('continue')}
+            className="mt-3 w-full rounded-lg bg-[#7C3AED] py-2 text-xs font-medium text-white hover:bg-[#8B5CF6]"
+          >
+            Continue after login
+          </button>
+        ) : null}
+
+        {active && !isLogin ? (
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-[10px] text-[#666666]">{prompt.hint || 'Type your answer below'}</p>
+            <button
+              type="button"
+              onClick={() => onAnswer('skip')}
+              className="shrink-0 text-[10px] text-[#666666] underline-offset-2 hover:text-[#A1A1A1] hover:underline"
+            >
+              Skip
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ActivityLine({ entry }) {
+  return (
+    <div className="flex items-start gap-2 px-1 text-[11px] leading-snug text-[#666666]">
+      <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-[#444444]" />
+      <p className="min-w-0 flex-1 whitespace-pre-wrap break-words">{entry.text}</p>
+      <span className="shrink-0 font-mono text-[10px] text-[#444444]">{formatLogTime(entry.ts)}</span>
     </div>
   );
 }
@@ -258,6 +560,10 @@ export default function Dashboard() {
   const [chatStarted, setChatStarted] = useState(false);
   const [activeFormUrl, setActiveFormUrl] = useState(null);
   const logsEndRef = useRef(null);
+  const currentPromptRef = useRef(null);
+  useEffect(() => {
+    currentPromptRef.current = currentPrompt;
+  }, [currentPrompt]);
   const vncContainerRef = useRef(null);
   const vncSrc = useMemo(() => buildVncSrc(), []);
 
@@ -265,18 +571,79 @@ export default function Dashboard() {
 
   const threadItems = useMemo(() => {
     const items = [];
+    const answers = new Map();
+    for (const entry of logs) {
+      if (entry.role === 'user' && entry.answerFor) answers.set(entry.answerFor, entry);
+    }
+
+    let scan = null;
+    let page = null;
+    const finishScan = () => {
+      // Anything left unasked once the agent moves on was answered from cache / by AI.
+      if (scan) {
+        for (const q of scan.questions) if (q.status === 'pending') q.status = 'auto';
+      }
+    };
+
     for (const entry of logs) {
       if (entry.role === 'log') {
-        const tool = inferToolFromLog(entry.text);
-        if (tool) {
-          items.push({ kind: 'tool', id: `tool-${entry.ts}-${tool.name}`, tool, ts: entry.ts });
+        const text = entry.text.trim();
+        const pageMatch = text.match(/Scanning form page (\d+)/i);
+        if (pageMatch) page = Number(pageMatch[1]);
+
+        const found = text.match(/Found (\d+) question/i);
+        if (found) {
+          finishScan();
+          scan = { kind: 'scan', id: `scan-${entry.id}`, total: Number(found[1]), page, questions: [] };
+          items.push(scan);
           continue;
         }
+        if (scan && text.startsWith('•')) {
+          const q = parseQuestionBullet(text);
+          if (q) scan.questions.push({ ...q, status: 'pending', answer: null });
+          continue;
+        }
+        const tool = inferToolFromLog(text);
+        if (tool) {
+          items.push({ kind: 'tool', id: `tool-${entry.id}`, tool, ts: entry.ts });
+        } else {
+          items.push({ kind: 'activity', id: `act-${entry.id}`, entry });
+        }
+        continue;
       }
-      items.push({ kind: 'chat', id: `chat-${entry.ts}-${entry.role}`, entry });
+
+      if (entry.role === 'agent' && entry.prompt) {
+        const prompt = entry.prompt;
+        const answer = answers.get(entry.id) || null;
+        const active = currentPrompt?.entryId === entry.id;
+        let step = null;
+        let total = null;
+        if (scan && prompt.kind !== 'login') {
+          const idx = scan.questions.findIndex(
+            (q) => q.question === prompt.question && (q.status === 'pending' || q.status === 'current'),
+          );
+          if (idx !== -1) {
+            const q = scan.questions[idx];
+            step = idx + 1;
+            total = scan.questions.length;
+            if (answer) {
+              const raw = (answer.raw ?? answer.text).trim().toLowerCase();
+              q.status = raw === 'skip' ? 'skipped' : 'answered';
+              q.answer = raw === 'skip' ? null : answer.text;
+            } else if (active) {
+              q.status = 'current';
+            }
+          }
+        }
+        items.push({ kind: 'question', id: `q-${entry.id}`, entryId: entry.id, prompt, step, total, page: scan?.page, answer, active });
+        continue;
+      }
+
+      if (entry.role === 'system' && /finished|submitted|stopped/i.test(entry.text)) finishScan();
+      items.push({ kind: 'chat', id: `chat-${entry.id}`, entry });
     }
     return items;
-  }, [logs]);
+  }, [logs, currentPrompt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -306,9 +673,23 @@ export default function Dashboard() {
       setBackendOk(true);
       const data = JSON.parse(event.data);
       if (data.type === 'prompt') {
-        setCurrentPrompt(data);
         const label = data.question || data.kind || 'Input needed';
-        setLogs((prev) => [...prev, logEntry('agent', label)]);
+        const entry = logEntry('agent', label, { prompt: data });
+        const prompt = { ...data, entryId: entry.id };
+        currentPromptRef.current = prompt;
+        setCurrentPrompt(prompt);
+        setLogs((prev) => [...prev, entry]);
+      } else if (data.type === 'prompt-resolved') {
+        // Answered without chat input, e.g. the file arrived from the phone.
+        const open = currentPromptRef.current;
+        currentPromptRef.current = null;
+        setCurrentPrompt(null);
+        if (open && data.answer) {
+          setLogs((prev) => [
+            ...prev,
+            logEntry('user', data.answer, { answerFor: open.entryId, raw: data.answer }),
+          ]);
+        }
       } else if (data.type === 'done') {
         setIsRunning(false);
         setCurrentPrompt(null);
@@ -373,12 +754,15 @@ export default function Dashboard() {
       currentPrompt?.kind === 'login' ? 'continue' : answerRaw.trim();
     if (!value && currentPrompt?.kind !== 'login') return;
 
+    const display =
+      currentPrompt?.kind === 'login'
+        ? 'Continue after login'
+        : value.toLowerCase() === 'skip'
+          ? 'Skipped'
+          : formatAnswerDisplay(currentPrompt, value);
     setLogs((prev) => [
       ...prev,
-      logEntry(
-        'user',
-        currentPrompt?.kind === 'login' ? 'Continue after login' : value,
-      ),
+      logEntry('user', display, { answerFor: currentPrompt?.entryId, raw: value }),
     ]);
     try {
       await fetch(`${BACKEND_URL}/api/answer`, {
@@ -437,7 +821,7 @@ export default function Dashboard() {
     : currentPrompt?.kind === 'login'
       ? 'Sign in on the right, then send or click Continue…'
       : currentPrompt
-        ? 'Your answer for this field…'
+        ? `${currentPrompt.hint || 'Your answer for this field'}…`
         : isRunning
           ? 'Agent is working…'
           : 'Paste another form link to run again…';
@@ -506,46 +890,24 @@ export default function Dashboard() {
                 </div>
               ) : (
                 <div className="space-y-3 pb-2">
-                  {currentPrompt ? (
-                    <div className="rounded-xl border border-[#7C3AED]/30 bg-[#7C3AED]/10 px-3 py-2.5">
-                      <p className="text-[10px] font-medium uppercase tracking-wide text-[#8B5CF6]">
-                        {currentPrompt.kind === 'login' ? 'Sign in' : 'Question'}
-                      </p>
-                      <p className="mt-1 text-sm text-[#F5F5F5]">{currentPrompt.question}</p>
-                      {currentPrompt.fieldType ? (
-                        <p className="mt-1 text-[10px] text-[#666666]">
-                          {currentPrompt.fieldType}
-                        </p>
-                      ) : null}
-                      {currentPrompt.options?.length ? (
-                        <ul className="mt-2 space-y-0.5 text-[11px] text-[#A1A1A1]">
-                          {currentPrompt.options.map((opt) => (
-                            <li key={opt.ref || opt.index}>
-                              <span className="font-mono text-[#8B5CF6]">{opt.index}.</span>{' '}
-                              {opt.label}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                      {currentPrompt.kind === 'login' ? (
-                        <button
-                          type="button"
-                          onClick={() => submitAnswer('continue')}
-                          className="mt-3 w-full rounded-lg bg-[#7C3AED] py-2 text-xs font-medium text-white hover:bg-[#8B5CF6]"
-                        >
-                          Continue after login
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-
-                  {threadItems.map((item) =>
-                    item.kind === 'tool' ? (
-                      <ToolCallCard key={item.id} tool={item.tool} ts={item.ts} />
-                    ) : (
-                      <ChatBubble key={item.id} entry={item.entry} />
-                    ),
-                  )}
+                  {threadItems.map((item) => {
+                    if (item.kind === 'tool') {
+                      return <ToolCallCard key={item.id} tool={item.tool} ts={item.ts} />;
+                    }
+                    if (item.kind === 'scan') return <FormScanCard key={item.id} scan={item} />;
+                    if (item.kind === 'question') {
+                      return (
+                        <QuestionBubble
+                          key={item.id}
+                          item={item}
+                          active={item.active}
+                          onAnswer={submitAnswer}
+                        />
+                      );
+                    }
+                    if (item.kind === 'activity') return <ActivityLine key={item.id} entry={item.entry} />;
+                    return <ChatBubble key={item.id} entry={item.entry} />;
+                  })}
                   <div ref={logsEndRef} />
                 </div>
               )}
@@ -579,7 +941,7 @@ export default function Dashboard() {
           </div>
         </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col bg-[#0B0B0B]">
+        <main className="relative flex min-w-0 flex-1 flex-col bg-[#0B0B0B]">
           <div className="flex shrink-0 items-center justify-between border-b border-[#292929] px-4 py-2">
             <div>
               <p className="text-[11px] font-medium uppercase tracking-wider text-[#666666]">
@@ -587,13 +949,16 @@ export default function Dashboard() {
               </p>
               <StatusDot ok={vncReady} label={vncReady ? 'Live' : 'Standby'} />
             </div>
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              className="rounded border border-[#292929] px-2 py-1 text-xs text-[#A1A1A1] transition-colors hover:bg-[#151515] hover:text-[#F5F5F5]"
-            >
-              ⛶ Fullscreen
-            </button>
+            <div className="flex items-center gap-2">
+              <PhoneBridgePanel />
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                className="rounded border border-[#292929] px-2 py-1 text-xs text-[#A1A1A1] transition-colors hover:bg-[#151515] hover:text-[#F5F5F5]"
+              >
+                ⛶ Fullscreen
+              </button>
+            </div>
           </div>
 
           <div ref={vncContainerRef} className="relative min-w-0 flex-1 bg-black">

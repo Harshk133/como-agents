@@ -162,6 +162,8 @@ docker run -p 9377:9377 camofox-browser
 - `plugins/vnc/index.js` - VNC plugin routes (no `child_process` -- spawning isolated in `vnc-launcher.js`)
 - `plugins/vnc/vnc-launcher.js` - VNC process management (`child_process` isolated here)
 - `plugins/persistence/index.js` - Session persistence lifecycle hooks
+- `plugins/phone-bridge/` - QR phone-to-browser file transfer (pairing, phone upload page, attach via `/tabs/:tabId/upload`); see its README
+- `camofox-dashboard/src/app/api/phone-bridge/[...path]/route.js` - Server-side proxy from the dashboard to the phone-bridge desktop routes (holds the Camofox key)
 - `lib/persistence.js` - Atomic storage state read/write
 - `lib/inflight.js` - Inflight request coalescing
 - `lib/tmp-cleanup.js` - Orphaned temp file cleanup

@@ -951,7 +951,7 @@
           "Interaction"
         ],
         "summary": "Attach a file to an upload control",
-        "description": "Attaches files from the configured upload directory without going through the native OS file dialog. Set CAMOFOX_UPLOADS_DIR to a directory that contains the files (default: ~/.camofox/uploads). Two strategies are tried in order: (1) if an <input type=\"file\"> is already present, call Playwright setInputFiles on it directly (works for hidden inputs); (2) otherwise arm a filechooser listener, activate the trigger element (ref or selector) via keyboard (focus + Enter) then a forced click as fallback, and call setFiles on the resulting chooser. Each path must be an absolute path that resolves inside the configured upload directory.\n",
+        "description": "Attaches files from the configured upload directory without going through the native OS file dialog. Set CAMOFOX_UPLOADS_DIR to a directory that contains the files (default: ~/.camofox/uploads). Two strategies are tried in order: (1) if an <input type=\"file\"> is already present, call Playwright setInputFiles on it directly (works for hidden inputs) -- the input matched by `selector` when it is itself a file input, else the first one on the page; (2) otherwise arm a filechooser listener, activate the trigger element (ref or selector) via keyboard (focus + Enter) then a forced click as fallback, and call setFiles on the resulting chooser. Each path must be an absolute path that resolves inside the configured upload directory.\n",
         "parameters": [
           {
             "name": "tabId",
@@ -996,7 +996,7 @@
                   },
                   "selector": {
                     "type": "string",
-                    "description": "Trigger element CSS/Playwright selector. Optional when an input[type=file] already exists."
+                    "description": "Trigger element CSS/Playwright selector, or a selector for the specific input[type=file] to fill (e.g. 'input[type=\"file\"] >> nth=1'). Optional when an input[type=file] already exists."
                   },
                   "timeout": {
                     "type": "integer",

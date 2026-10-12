@@ -549,3 +549,46 @@ describe('middleware function naming', () => {
     expect(mw.name).toBe('requireAuthCheck');
   });
 });
+
+// --------------------------------------------------------------------
+// Phone-bridge phone routes (plugins/phone-bridge)
+// --------------------------------------------------------------------
+
+describe('accessKeyMiddleware phone-bridge exemptions', () => {
+  const mw = accessKeyMiddleware({ accessKey: ACCESS_KEY });
+
+  function run(method, path) {
+    const req = mockReq({ method, path });
+    const res = mockRes();
+    const next = jest.fn();
+    mw(req, res, next);
+    return { next, res };
+  }
+
+  test.each([
+    ['GET', '/phone-bridge/m'],
+    ['POST', '/phone-bridge/phone/preview'],
+    ['POST', '/phone-bridge/phone/pair'],
+    ['GET', '/phone-bridge/phone/status'],
+    ['POST', '/phone-bridge/phone/files'],
+    ['POST', '/phone-bridge/phone/disconnect'],
+  ])('%s %s is reachable without the access key (token-authenticated in the plugin)', (method, path) => {
+    const { next, res } = run(method, path);
+    expect(next).toHaveBeenCalled();
+    expect(res._status).toBeNull();
+  });
+
+  test.each([
+    ['POST', '/phone-bridge/sessions'],
+    ['GET', '/phone-bridge/sessions/abc12345'],
+    ['POST', '/phone-bridge/sessions/abc12345/files/f1234567/attach'],
+    ['DELETE', '/phone-bridge/sessions/abc12345'],
+    ['POST', '/phone-bridge/m'],
+    ['POST', '/phone-bridge/phone/other'],
+    ['POST', '/phone-bridge/phone/files/../../tabs'],
+  ])('%s %s still requires the access key', (method, path) => {
+    const { next, res } = run(method, path);
+    expect(next).not.toHaveBeenCalled();
+    expect(res._status).toBe(401);
+  });
+});

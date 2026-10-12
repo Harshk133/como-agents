@@ -52,6 +52,17 @@ function handleAgentLine(trimmed) {
     broadcast({ type: 'prompt', ...prompt });
     return;
   }
+  if (trimmed.startsWith('@@RESOLVED@@')) {
+    // The open prompt was answered without chat input (e.g. a file arrived from the phone).
+    let payload = {};
+    try {
+      payload = JSON.parse(trimmed.replace('@@RESOLVED@@', ''));
+    } catch {
+      /* resolve without an answer label */
+    }
+    broadcast({ type: 'prompt-resolved', answer: payload.answer || '' });
+    return;
+  }
   if (trimmed.startsWith('@@LOG@@')) {
     broadcast({ type: 'log', message: trimmed.replace('@@LOG@@', '') });
     return;
@@ -103,14 +114,29 @@ app.get('/api/logs', (req, res) => {
   });
 });
 
+function isAllowedFormUrl(raw) {
+  try {
+    const u = new URL(String(raw).trim());
+    if (!u.hostname.endsWith('google.com')) return false;
+    return u.pathname.includes('/forms/');
+  } catch {
+    return false;
+  }
+}
+
 app.post('/api/run', async (req, res) => {
   const mode = req.body?.mode === 'ai' ? 'ai' : 'manual';
+  const formUrl = req.body?.formUrl?.trim();
+  if (formUrl && !isAllowedFormUrl(formUrl)) {
+    return res.status(400).json({ error: 'formUrl must be a Google Forms link' });
+  }
   console.log(`📩 /api/run — spawning smart-agent (${mode} mode)...`);
 
   stopCurrentAgent();
 
   const args = ['smart-agent.js'];
   if (mode === 'ai') args.push('--ai');
+  if (formUrl) args.push('--url', formUrl);
 
   const camofoxApiPort = process.env.CAMOFOX_API_PORT || '9377';
 
@@ -121,6 +147,7 @@ app.post('/api/run', async (req, res) => {
       PORT: camofoxApiPort,
       FORCE_COLOR: '0',
       DASHBOARD_MODE: '1',
+      ...(formUrl ? { FORM_URL: formUrl } : {}),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });

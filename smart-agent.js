@@ -20,8 +20,20 @@ const AI_MODE = argv.includes('--ai')
 const modelFlag = argv.find((a) => a.startsWith('--model='));
 const OLLAMA_MODEL = modelFlag?.split('=')[1] || process.env.OLLAMA_MODEL;
 
-const FORM_URL = process.env.NEXT_PUBLIC_FORM_URL
-  || 'https://docs.google.com/forms/d/e/1FAIpQLSc63YdVXFb93gM2v_OwEv5Dw9bFxfhi6NTIeKPQl5reT3NIhA/viewform?usp=publish-editor';
+const urlFlagIdx = argv.indexOf('--url');
+const FORM_URL =
+  (urlFlagIdx >= 0 && argv[urlFlagIdx + 1]) ||
+  process.env.FORM_URL ||
+  process.env.NEXT_PUBLIC_FORM_URL ||
+  'https://docs.google.com/forms/d/e/1FAIpQLSc63YdVXFb93gM2v_OwEv5Dw9bFxfhi6NTIeKPQl5reT3NIhA/viewform?usp=publish-editor';
+
+// Camofox routes such as /phone-bridge/sessions require the API key outside
+// local development; send it when the environment provides one.
+const CAMOFOX_KEY = process.env.CAMOFOX_API_KEY || process.env.CAMOFOX_ACCESS_KEY || '';
+if (CAMOFOX_KEY) axios.defaults.headers.common.Authorization = `Bearer ${CAMOFOX_KEY}`;
+
+const PHONE_POLL_MS = 1500;
+const PHONE_QR_ATTEMPTS = 3;
 
 const MAX_FORM_PAGES = 25;
 const SCROLL_PASSES = 6;
@@ -43,16 +55,26 @@ function dashError(message) {
   else console.error(message);
 }
 
-function ask(prompt) {
-  if (DASHBOARD_MODE) {
-    return new Promise((resolve) => rl.question('', resolve));
-  }
-  return new Promise((resolve) => rl.question(prompt, resolve));
+/** Read one line of input. With a signal, resolves null if aborted first. */
+function ask(prompt, { signal } = {}) {
+  const query = DASHBOARD_MODE ? '' : prompt;
+  return new Promise((resolve) => {
+    if (!signal) return rl.question(query, resolve);
+    if (signal.aborted) return resolve(null);
+    signal.addEventListener('abort', () => resolve(null), { once: true });
+    rl.question(query, { signal }, resolve);
+  });
 }
 
-async function dashPrompt(payload) {
+async function dashPrompt(payload, { signal } = {}) {
   console.log(`@@PROMPT@@${JSON.stringify(payload)}`);
-  return (await ask('')).trim();
+  const answer = await ask('', { signal });
+  return answer == null ? null : answer.trim();
+}
+
+/** Tell the dashboard the open prompt was answered by something other than chat. */
+function dashResolved(answer) {
+  if (DASHBOARD_MODE) console.log(`@@RESOLVED@@${JSON.stringify({ answer })}`);
 }
 
 function pauseForLogin() {
@@ -70,6 +92,7 @@ function fieldKey(field) {
   if (field.type === 'radio' || field.type === 'checkbox') {
     return `${field.question}::${field.type}`;
   }
+  if (field.type === 'file') return `${field.question}::file::${field.fileIndex}`;
   return `${field.question}::${field.type}::${field.ref}`;
 }
 
@@ -206,8 +229,132 @@ async function promptForAnswer(field) {
   return resolveAnswerToAction(field, raw);
 }
 
+// ---------------------------------------------------------------------------
+// File-upload questions: QR code -> phone upload page -> attach in the browser
+// (plugins/phone-bridge on the Camofox server).
+// ---------------------------------------------------------------------------
+
+function apiError(err) {
+  return err.response?.data?.error || err.message;
+}
+
+/** Poll the pairing until the phone has sent a file, the pairing ends, or we are aborted. */
+async function waitForPhoneFile(pairing, signal) {
+  const url = `${BASE_URL}/phone-bridge/sessions/${pairing.sessionId}`;
+  const headers = { 'X-Phone-Bridge-Token': pairing.desktopToken };
+  let announcedPair = false;
+  let announcedUpload = false;
+  while (!signal.aborted) {
+    let state;
+    try {
+      state = (await axios.get(url, { headers })).data;
+    } catch (err) {
+      if (err.response?.status === 404) return { ended: 'expired' };
+      await sleep(PHONE_POLL_MS);
+      continue;
+    }
+    if (state.status === 'expired' || state.status === 'revoked') return { ended: state.status, paired: announcedPair };
+    if (state.status === 'paired' && !announcedPair) {
+      announcedPair = true;
+      dashLog('📱 Phone connected — choose the file on your phone and tap Send.');
+    }
+    if (state.uploadsInProgress > 0 && !announcedUpload) {
+      announcedUpload = true;
+      dashLog('⬆️ Receiving file from phone…');
+    }
+    const file = state.files?.find((f) => f.status === 'received');
+    if (file && !state.uploadsInProgress) return { file };
+    await sleep(PHONE_POLL_MS);
+  }
+  return { aborted: true };
+}
+
+async function endPairing(pairing) {
+  await axios.delete(`${BASE_URL}/phone-bridge/sessions/${pairing.sessionId}`, {
+    headers: { 'X-Phone-Bridge-Token': pairing.desktopToken },
+  }).catch(() => {});
+}
+
+/**
+ * Show a QR code for this question, wait for the user's phone to send a file
+ * (or for "skip" in chat), then attach it through the question's "Add file" picker.
+ */
+async function phoneUploadForField(tabId, field) {
+  for (let attempt = 1; attempt <= PHONE_QR_ATTEMPTS; attempt++) {
+    let pairing;
+    try {
+      pairing = (await axios.post(`${BASE_URL}/phone-bridge/sessions`, {
+        userId: USER_ID,
+        maxFiles: 1,
+        purpose: field.question,
+      })).data;
+    } catch (err) {
+      dashError(`Could not start the phone upload for "${field.question}": ${apiError(err)}. Attach it in the live browser instead.`);
+      return { kind: 'file-skipped' };
+    }
+
+    const abort = new AbortController();
+    const payload = {
+      kind: 'file-upload',
+      question: field.question,
+      fieldType: 'file upload',
+      pairUrl: pairing.pairUrl,
+      code: pairing.code,
+      pairingExpiresAt: pairing.pairingExpiresAt,
+      hint: 'Scan the QR code with your phone, or type "skip"',
+    };
+    const chat = DASHBOARD_MODE
+      ? dashPrompt(payload, { signal: abort.signal })
+      : (console.log(`\n📎 ${field.question}\n   Open on your phone: ${pairing.pairUrl}\n   (code ${pairing.code})`),
+        ask('Waiting for your phone… type "skip" to skip: ', { signal: abort.signal }));
+    const result = await Promise.race([
+      chat.then((answer) => ({ answer })),
+      waitForPhoneFile(pairing, abort.signal),
+    ]);
+    abort.abort();
+
+    if (result.answer != null) {
+      await endPairing(pairing);
+      dashLog(`⏭️ Skipped file upload: ${field.question}`);
+      return { kind: 'file-skipped' };
+    }
+
+    if (result.ended) {
+      await endPairing(pairing);
+      if (result.ended === 'expired' && !result.paired && attempt < PHONE_QR_ATTEMPTS) {
+        dashResolved('QR code expired');
+        dashLog('⌛ QR code expired — showing a new one.');
+        continue;
+      }
+      dashResolved('No file received');
+      dashError(`No file received for "${field.question}". Attach it in the live browser if it is required.`);
+      return { kind: 'file-skipped' };
+    }
+
+    const { file } = result;
+    dashLog(`📥 Received "${file.name}" — attaching it to the form…`);
+    try {
+      const res = await axios.post(
+        `${BASE_URL}/phone-bridge/sessions/${pairing.sessionId}/files/${file.id}/attach`,
+        { tabId, pickerIndex: field.fileIndex ?? 0 },
+        { headers: { 'X-Phone-Bridge-Token': pairing.desktopToken }, timeout: 150000 },
+      );
+      dashResolved(`📎 ${file.name}`);
+      dashLog(`✅ Attached "${file.name}" (${res.data.via}). Check it in the live browser.`);
+      await endPairing(pairing);
+      return { kind: 'file-attached', name: file.name };
+    } catch (err) {
+      dashResolved(`⚠️ ${file.name} not attached`);
+      dashError(`Could not attach "${file.name}": ${apiError(err)}`);
+      await endPairing(pairing);
+      return { kind: 'file-failed' };
+    }
+  }
+  return { kind: 'file-skipped' };
+}
+
 async function aiAnswersForPage(fields, answersCache) {
-  const missing = fields.filter((f) => !answersCache.has(fieldKey(f)));
+  const missing = fields.filter((f) => f.type !== 'file' && !answersCache.has(fieldKey(f)));
   if (!missing.length) return;
 
   console.log(`\n🧠 AI answering ${missing.length} question(s) on this page...`);
@@ -282,6 +429,10 @@ async function fillPage(tabId, fields, answersCache, { aiMode = false } = {}) {
 
   for (const field of fields) {
     const key = fieldKey(field);
+    if (field.type === 'file') {
+      if (!answersCache.has(key)) answersCache.set(key, await phoneUploadForField(tabId, field));
+      continue;
+    }
     let action;
     if (!answersCache.has(key)) {
       action = await promptForAnswer(field);
